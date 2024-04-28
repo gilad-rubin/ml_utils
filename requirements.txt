@@ -2,6 +2,11 @@ matplotlib
 scipy
 numpy
 ipywidgets
+ipykernel
 seaborn
 pandas
 scikit-learn
+scikit-opt
+autogluon
+category-encoders
+bokeh==2.0.1
