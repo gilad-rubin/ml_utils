@@ -1,2 +1,4 @@
 *Autogluon*
 *.pyc
+*catboost_info*
+*.log
