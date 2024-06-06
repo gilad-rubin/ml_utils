@@ -1,3 +1,5 @@
+jupyter
+jupyterlab
 matplotlib
 scipy
 numpy
@@ -6,8 +8,4 @@ ipykernel
 seaborn
 pandas
 scikit-learn
-scikit-opt
-autogluon
-category-encoders
-bokeh==2.0.1
 shap

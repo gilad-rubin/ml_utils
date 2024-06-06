@@ -2,3 +2,5 @@
 *.pyc
 *catboost_info*
 *.log
+*.png
+*test-output*
