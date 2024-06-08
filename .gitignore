@@ -4,3 +4,7 @@
 *.log
 *.png
 *test-output*
+# pixi environments
+.pixi
+*.egg-info
+
