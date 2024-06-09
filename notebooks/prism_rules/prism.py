@@ -519,7 +519,9 @@ import pandas as pd
 from joblib import Parallel, delayed
 
 import time
-
+import pandas as pd
+import numpy as np
+from scipy.sparse import csr_matrix
 
 class PrismRules:
     def __init__(self, encoder, discretizer, evaluator):
@@ -612,10 +614,10 @@ class PrismRules:
         final_rules = self.beautify_rules(self.rules, self.encoder.category_mappings)
         return final_rules
 
+    
     # TODO: rename ?
     # TODO: add self.max_depth? or max_depth here?
     # TODO: enable the building of multiple nodes under the root where it's implicit that it's relevant to the negative of all the rules that have been applied so far
-
     def find_rules_recursive(
         self, X, y, chosen_rules, applied_path, rule_filter, max_depth=3
     ):
