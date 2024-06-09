@@ -124,7 +124,9 @@ class SortedOrdinalEncoder:
         for col in X_transformed.columns:
             if col in self.category_mappings:
                 # Apply the mappings, and specifically handle NaNs according to encoded_missing_value
-                X_transformed[col] = X_transformed[col].map(self.category_mappings[col])
+                X_transformed[col] = (
+                    X_transformed[col].map(self.category_mappings[col]).astype(float)
+                )
                 if self.encoded_missing_value is not np.nan:
                     X_transformed[col].fillna(self.encoded_missing_value, inplace=True)
         return X_transformed
@@ -234,15 +236,15 @@ class PandasQCutDiscretizer:
             raise RuntimeError("The discretizer has not been fitted yet.")
         X_transformed = X.copy()
         for idx, col in enumerate(X.columns):
-            if X[col].dtype in [
-                np.float64,
-                np.int64,
-            ]:  # Discretize numeric columns only
-                X_transformed[col], bins = pd.qcut(
-                    X[col], self.bins[idx], retbins=True, duplicates="drop"
-                )
-                self.left_edges[col] = bins[:-1]
-                self.right_edges[col] = bins[1:]
+            # if X[col].dtype in [
+            #     np.float64,
+            #     np.int64,
+            # ]:  # Discretize numeric columns only
+            X_transformed[col], bins = pd.qcut(
+                X[col], self.bins[idx], retbins=True, duplicates="drop"
+            )
+            self.left_edges[col] = bins[:-1]
+            self.right_edges[col] = bins[1:]
         return X_transformed
 
     def fit_transform(self, X, n_bins=None):
@@ -361,6 +363,7 @@ import numpy as np
 
 from abc import ABC, abstractmethod
 
+
 class ScoreStrategy(ABC):
     name = None
     greater_is_better = True
@@ -375,7 +378,6 @@ class ScoreStrategy(ABC):
         if denominator == 0:
             return default
         return numerator / denominator
-
 
 
 class RecallScore(ScoreStrategy):
@@ -397,26 +399,35 @@ class PrecisionScore(ScoreStrategy):
         predicted_positives = kwargs.get("predicted_positives", 0)
         return true_positives / predicted_positives if predicted_positives != 0 else 0
 
+
 class WoEScore(ScoreStrategy):
     name = "WoE"
     greater_is_better = True
 
     def calculate(self, **kwargs):
-        true_positives = kwargs.get('true_positives', 0)
-        false_positives = kwargs.get('false_positives', 0)
-        total_positives = kwargs.get('total_positives', 0)
-        total_negatives = kwargs.get('total_negatives', 0)
+        true_positives = kwargs.get("true_positives", 0)
+        false_positives = kwargs.get("false_positives", 0)
+        total_positives = kwargs.get("total_positives", 0)
+        total_negatives = kwargs.get("total_negatives", 0)
 
         if total_positives == 0 or total_negatives == 0:
             return 0  # Return zero or another indicative value when there's no valid data to process.
+        if false_positives == 0:
+            false_positives = 1e-10
 
         good_ratio = self.safe_divide(true_positives, total_positives, default=0)
         bad_ratio = self.safe_divide(false_positives, total_negatives, default=0)
 
         if good_ratio <= 0 or bad_ratio <= 0:
-            return float('-inf')  # Logarithm of zero or negative is undefined, handle gracefully.
+            return float(
+                "-inf"
+            )  # Logarithm of zero or negative is undefined, handle gracefully.
 
-        return np.log(good_ratio / bad_ratio) if good_ratio > 0 and bad_ratio > 0 else float('-inf')
+        return (
+            np.log(good_ratio / bad_ratio)
+            if good_ratio > 0 and bad_ratio > 0
+            else float("-inf")
+        )
 
 
 class RuleScore:
@@ -505,6 +516,9 @@ class BinaryRuleFilter:
 # TODO: support regression (By Binning Target)
 # TODO: rethink classes and calls
 import pandas as pd
+from joblib import Parallel, delayed
+
+import time
 
 
 class PrismRules:
@@ -512,7 +526,6 @@ class PrismRules:
         self.encoder = encoder
         self.discretizer = discretizer
         self.evaluator = evaluator
-        self.rules = []
 
     def generate_all_potential_rules(self, X):
         rules = []
@@ -521,9 +534,9 @@ class PrismRules:
             right_edges = self.discretizer.right_edges.get(feature, [])
             # TODO: test if this makes sense (or redundant)
             rules.extend([Rule(feature, ">", edge) for edge in left_edges])
-            rules.extend([Rule(feature, ">=", edge) for edge in left_edges])
+            # rules.extend([Rule(feature, ">=", edge) for edge in left_edges])
             rules.extend([Rule(feature, "<=", edge) for edge in right_edges])
-            rules.extend([Rule(feature, "<", edge) for edge in right_edges])
+            # rules.extend([Rule(feature, "<", edge) for edge in right_edges])
 
             if X[feature].isna().any():
                 rules.append(Rule(feature, "isna", None))
@@ -583,7 +596,9 @@ class PrismRules:
 
         self.all_potential_rules = self.generate_all_potential_rules(X_preprocessed)
 
-        final_rules = self.find_rules_recursive(
+        print("Starting to find rules...")
+        start_time = time.time()
+        self.rules = self.find_rules_recursive(
             X_encoded,
             y,
             chosen_rules=[],
@@ -591,50 +606,55 @@ class PrismRules:
             rule_filter=rule_filter,
             max_depth=max_depth,
         )
+        end_time = time.time()
+        print(f"Found {len(self.rules)} rules in {end_time - start_time} seconds")
 
-        # self.beautify_rules(final_rules, self.encoder, X)
+        final_rules = self.beautify_rules(self.rules, self.encoder.category_mappings)
         return final_rules
 
     # TODO: rename ?
     # TODO: add self.max_depth? or max_depth here?
     # TODO: enable the building of multiple nodes under the root where it's implicit that it's relevant to the negative of all the rules that have been applied so far
+
     def find_rules_recursive(
         self, X, y, chosen_rules, applied_path, rule_filter, max_depth=3
     ):
         if applied_path is not None:
             if len(applied_path.rules) >= max_depth:
                 return chosen_rules
-            
-        #print(f"Evaluating with applied path: {applied_path}")
+
+        # print(f"Evaluating with applied path: {applied_path}")
         applied_path = applied_path if applied_path else Path(rules=[], score=None)
         evaluated_paths = []
+        start_time = time.time()
         for rule in self.all_potential_rules:
             if rule in applied_path.rules:
                 continue
-
-            mask = rule.get_mask(X)
-            if mask.sum() == len(X) or mask.sum() == applied_path.get_mask(X).sum():
-                continue
             path = Path(applied_path.rules + [rule])
+
             path.score = self.evaluator.evaluate(path, X, y)
             if rule_filter.apply(path):
                 evaluated_paths.append((path))
+        end_time = time.time()
+        # print(
+        #     f"Evaluated {len(evaluated_paths)} paths in {end_time - start_time} seconds"
+        # )
 
         if len(evaluated_paths) == 0:
             return chosen_rules
 
         best_path = Path.find_best_path(evaluated_paths)
-        #print(f"Best path: {best_path} with score: {best_path.score}")
-        #print(mask.sum(), applied_path.get_mask(X).sum(), len(X))
+        # print(f"Best path: {best_path} with score: {best_path.score}")
+        # print(mask.sum(), applied_path.get_mask(X).sum(), len(X))
         if applied_path is None or RuleScore.is_better(
             best_path.score, applied_path.score
         ):
-            #print(f"Found better path: {best_path}")
             # TODO: understand why there are duplicates here and cancel them
             if best_path in chosen_rules:
                 return chosen_rules
 
             chosen_rules.append(best_path)
+            print(f"Path: {best_path} with score: {best_path.score}")
 
             self.find_rules_recursive(
                 X, y, chosen_rules, best_path, rule_filter, max_depth
@@ -645,47 +665,181 @@ class PrismRules:
             applied_rules = applied_path.rules if applied_path else []
             neg_path = Path(applied_rules + [neg_last_rule])
             neg_path.score = self.evaluator.evaluate(neg_path, X, y)
-            #print(f"Negated path: {neg_path} with score: {neg_path.score}")
-            #if rule_filter.apply(neg_path):
-            #if neg_path in chosen_rules:
-            #    return chosen_rules
 
-            #chosen_rules.append(neg_path)
             self.find_rules_recursive(
-                X, y, chosen_rules, neg_path, rule_filter, max_depth
+                X, y, chosen_rules, neg_path, rule_filter, max_depth + 1
             )
 
         return chosen_rules
 
+    def convert_rule_to_categorical(self, rule, categories):
+        # Handle special operators that do not require conversion.
+        if rule.operator in ["isna", "notnull", "==", "!="]:
+            return rule
+
+        categories = [cat for cat in categories if isinstance(cat, str)]
+
+        # Convert the rule's value from an index to the corresponding category.
+        index = int(rule.value)  # Assuming value is already the correct integer index
+        if index >= len(categories):
+            print("Problem with index", index, "len(categories)", len(categories))
+            index = len(categories) - 1  # Clamp index to the last category
+        elif index < 0:
+            print("Problem with index", index, "len(categories)", len(categories))
+            index = 0  # Ensure index is non-negative
+
+        rule_cats = []
+        opposite_rule_cats = []
+        # Convert index-based comparison to category-based comparison.
+        if rule.operator == "<":
+            rule_cats = categories[:index]
+            opposite_rule_cats = categories[index:]
+        elif rule.operator == "<=":
+            rule_cats = categories[: index + 1]
+            opposite_rule_cats = categories[index + 1 :]
+        elif rule.operator == ">":
+            rule_cats = categories[index + 1 :]
+            opposite_rule_cats = categories[: index + 1]
+        elif rule.operator == ">=":
+            rule_cats = categories[index:]
+            opposite_rule_cats = categories[:index]
+
+        # Decide whether to use 'in' or 'not in' based on which list is shorter
+        if len(opposite_rule_cats) < len(rule_cats):
+            value = opposite_rule_cats
+            operator = "not in"
+        else:
+            value = rule_cats
+            operator = "in"
+
+        # Return the new rule with the chosen operator and value
+        return Rule(rule.feature, operator, value)
+
+    def beautify_rules(self, paths, category_mappings):
+        new_paths = []
+        for path in paths:
+            path_rules = []
+            for rule in path.rules:
+                if rule.feature in category_mappings:
+                    new_rule = self.convert_rule_to_categorical(
+                        rule, list(category_mappings[rule.feature].keys())
+                    )
+                    new_rule.score = rule.score
+                    path_rules.append(new_rule)
+                else:
+                    path_rules.append(rule)
+            new_path = Path(rules=path_rules, score=path.score)
+            new_paths.append(new_path)
+        return new_paths
+
+    def beautify_rules3(self, paths):  # , category_mappings, X):
+        compact_paths = []
+        for path in paths:
+            features = [rule.feature for rule in path.rules]
+            dup_features = [
+                feature for feature in features if features.count(feature) > 1
+            ]
+            # final_rules = #non dup features:
+            final_rules = [
+                rule for rule in path.rules if rule.feature not in dup_features
+            ]
+            for feature in dup_features:
+                feature_rules = [rule for rule in path.rules if rule.feature == feature]
+                combined_rule = self.combine_rules(feature_rules)
+                final_rules.append(combined_rule)
+
+            compact_path = Path(rules=final_rules, score=path.score)
+            # Create a new Path with combined rules and the same score
+            compact_paths.append(compact_path)
+        for path in compact_paths:
+            print(path.rules)
+        return compact_paths
+
+    def combine_rules(self, rules):
+        if not rules:
+            return None
+
+        # Sort and filter rules for combination
+        rules.sort(key=lambda r: (r.operator, r.value))
+        min_rule = max_rule = None
+
+        for rule in rules:
+            if rule.operator in ["<", "<="] and (
+                not min_rule or rule.value < min_rule.value
+            ):
+                max_rule = rule
+            elif rule.operator in [">", ">="] and (
+                not max_rule or rule.value > max_rule.value
+            ):
+                min_rule = rule
+        print(
+            "min_rule",
+            min_rule,
+            "max_rule",
+            max_rule,
+            "min_rule.value",
+            min_rule.value,
+            "max_rule.value",
+            max_rule.value,
+        )
+        # Check for combinable conditions
+        if min_rule and max_rule:
+            if (
+                min_rule.value == max_rule.value
+                and max_rule.operator == "<="
+                and min_rule.operator == ">="
+            ):
+                return Rule(
+                    feature=min_rule.feature, operator="==", value=min_rule.value
+                )
+            if (
+                min_rule.operator in ["<", "<="]
+                and max_rule.operator in [">=", ">"]
+                and min_rule.value <= max_rule.value
+            ):
+                return Rule(
+                    feature=min_rule.feature,
+                    operator=min_rule.operator + max_rule.operator,
+                    value=(min_rule.value, max_rule.value),
+                )
+            if (
+                min_rule.operator == "<"
+                and max_rule.operator == ">="
+                and min_rule.value <= max_rule.value
+            ):
+                return (
+                    None  # Uncombinable rules, return None or original rules as needed
+                )
+        # Default return the original rules if no combination is possible
+        return rules
+
     # TODO: see if there is only one value in the rule and turn into x==4 or x!=4
     # TODO: convert "<=0" to ==0 where it's relevant. be aware of floats.
     # TODO: refactor
-    def beautify_rules(self, paths, encoder, X):
-        non_dup_rules = []
-        for path in paths:
-            for rule in path.rules:
-                if rule not in non_dup_rules:
-                    non_dup_rules.append(rule)
+    def beautify_rules2(self, paths, encoder, X):
+        # compact rules
+        # for path in paths:
+        # if there are two rules with the same feature, we can combine them: (< or <=) with (> or >=)
+        # so we combine a < 5 and a >=3 to 3 <= a < 5
+        # if we have a <=5 and a>=5 we can combine them to a==5
 
-        for rule in non_dup_rules:
-            try:
-                if rule.operator not in ["isna", "notnull"]:
-                    if rule.feature in encoder.category_mappings:
-                        value = encoder.convert_to_categorical(
-                            rule.feature, rule.value, rule.operator == ">"
-                        )
+        for rule in paths:
+            if rule.operator not in ["isna", "notnull"]:
+                if rule.feature in encoder.category_mappings:
+                    value = encoder.convert_to_categorical(
+                        rule.feature, rule.value, rule.operator == ">"
+                    )
 
-                        value_opposite = encoder.convert_to_categorical(
-                            rule.feature, rule.value, rule.operator != ">"
-                        )
+                    value_opposite = encoder.convert_to_categorical(
+                        rule.feature, rule.value, rule.operator != ">"
+                    )
 
-                        if len(value) <= len(value_opposite):
-                            rule.value = value
-                            rule.operator = "in"
-                        else:
-                            rule.value = value_opposite
-                            rule.operator = "not in"
-            except:
+                    if len(value) <= len(value_opposite):
+                        rule.value = value
+                        rule.operator = "in"
+                    else:
+                        rule.value = value_opposite
+                        rule.operator = "not in"
                 print(f"Failed to beautify rule: {rule}", rule.value)
 
     # TODO: refactor.
