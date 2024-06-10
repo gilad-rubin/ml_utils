@@ -113,9 +113,9 @@ class SortedOrdinalEncoder:
                         for idx, category in enumerate(sorted_categories)
                         if category is not np.nan
                     }
-                    category_mapping[
-                        np.nan
-                    ] = self.encoded_missing_value  # Explicit NaN mapping
+                    category_mapping[np.nan] = (
+                        self.encoded_missing_value
+                    )  # Explicit NaN mapping
                     self.category_mappings[col] = category_mapping
         return self
 
@@ -143,9 +143,9 @@ class SortedOrdinalEncoder:
                 inverse_map = {
                     v: k for k, v in self.category_mappings[col].items() if v != -1
                 }
-                inverse_map[
-                    self.encoded_missing_value
-                ] = np.nan  # Map encoded_missing_value back to NaN
+                inverse_map[self.encoded_missing_value] = (
+                    np.nan
+                )  # Map encoded_missing_value back to NaN
                 decoded_frames[col] = encoded_values[col].map(inverse_map)
         return pd.DataFrame(decoded_frames)
 
@@ -276,8 +276,9 @@ class QueryEvaluator(ABC):
 
 
 from abc import ABC, abstractmethod
-import pandas as pd
+
 import numpy as np
+import pandas as pd
 
 
 class Rule(QueryEvaluator):
@@ -359,9 +360,8 @@ class Path(QueryEvaluator):
 
 
 from abc import ABC, abstractmethod
-import numpy as np
 
-from abc import ABC, abstractmethod
+import numpy as np
 
 
 class ScoreStrategy(ABC):
@@ -515,35 +515,20 @@ class BinaryRuleFilter:
 # TODO: support multi-class (One VS Rest)
 # TODO: support regression (By Binning Target)
 # TODO: rethink classes and calls
+import time
+
+import numpy as np
 import pandas as pd
 from joblib import Parallel, delayed
+from scipy.sparse import csr_matrix, hstack, vstack
+from sklearn.preprocessing import KBinsDiscretizer
 
-import time
-import pandas as pd
-import numpy as np
-from scipy.sparse import csr_matrix
 
 class PrismRules:
     def __init__(self, encoder, discretizer, evaluator):
         self.encoder = encoder
         self.discretizer = discretizer
         self.evaluator = evaluator
-
-    def generate_all_potential_rules(self, X):
-        rules = []
-        for feature in X.columns:
-            left_edges = self.discretizer.left_edges.get(feature, [])
-            right_edges = self.discretizer.right_edges.get(feature, [])
-            # TODO: test if this makes sense (or redundant)
-            rules.extend([Rule(feature, ">", edge) for edge in left_edges])
-            # rules.extend([Rule(feature, ">=", edge) for edge in left_edges])
-            rules.extend([Rule(feature, "<=", edge) for edge in right_edges])
-            # rules.extend([Rule(feature, "<", edge) for edge in right_edges])
-
-            if X[feature].isna().any():
-                rules.append(Rule(feature, "isna", None))
-
-        return rules
 
     def check_input(self, X, y, cat_cols=None):
         # Validate X is a DataFrame
@@ -591,18 +576,15 @@ class PrismRules:
         Returns:
             list: The final set of rules that provide the best classification performance.
         """
+        self.check_input(X, y, cat_cols)
         informative_cols = [col for col in X.columns if len(pd.unique(X[col])) > 1]
 
         X_encoded = self.encoder.fit_transform(X[informative_cols], y)
-        X_preprocessed = self.discretizer.fit_transform(X_encoded)
-
-        self.all_potential_rules = self.generate_all_potential_rules(X_preprocessed)
+        X_sparse
 
         print("Starting to find rules...")
         start_time = time.time()
         self.rules = self.find_rules_recursive(
-            X_encoded,
-            y,
             chosen_rules=[],
             applied_path=None,
             rule_filter=rule_filter,
@@ -614,12 +596,11 @@ class PrismRules:
         final_rules = self.beautify_rules(self.rules, self.encoder.category_mappings)
         return final_rules
 
-    
     # TODO: rename ?
     # TODO: add self.max_depth? or max_depth here?
     # TODO: enable the building of multiple nodes under the root where it's implicit that it's relevant to the negative of all the rules that have been applied so far
     def find_rules_recursive(
-        self, X, y, chosen_rules, applied_path, rule_filter, max_depth=3
+        self, chosen_rules, applied_path, rule_filter, max_depth=3
     ):
         if applied_path is not None:
             if len(applied_path.rules) >= max_depth:
@@ -634,13 +615,13 @@ class PrismRules:
                 continue
             path = Path(applied_path.rules + [rule])
 
-            path.score = self.evaluator.evaluate(path, X, y)
+            path.score = self.evaluator.evaluate(path, self.X, self.y)
             if rule_filter.apply(path):
                 evaluated_paths.append((path))
         end_time = time.time()
-        # print(
-        #     f"Evaluated {len(evaluated_paths)} paths in {end_time - start_time} seconds"
-        # )
+        print(
+            f"Evaluated {len(evaluated_paths)} paths in {end_time - start_time} seconds"
+        )
 
         if len(evaluated_paths) == 0:
             return chosen_rules
@@ -658,9 +639,7 @@ class PrismRules:
             chosen_rules.append(best_path)
             print(f"Path: {best_path} with score: {best_path.score}")
 
-            self.find_rules_recursive(
-                X, y, chosen_rules, best_path, rule_filter, max_depth
-            )
+            self.find_rules_recursive(chosen_rules, best_path, rule_filter, max_depth)
 
             last_rule = best_path.rules[-1]
             neg_last_rule = last_rule.negate()
@@ -909,3 +888,531 @@ class PrismRules:
         shared_tree = self.build_shared_tree(paths)
         self.add_nodes_edges(dot, shared_tree, "root")
         display(dot)
+
+
+if __name__ == "__main__":
+    df = pd.read_csv("data/AmesHousing.csv")
+    cat_cols = df.select_dtypes(include=["object", "category"]).columns.tolist()
+    k = 1000
+    raw_y = df["SalePrice"].copy()
+    X = df.drop("SalePrice", axis=1).copy()
+    X = X.head(k)
+    raw_y = raw_y.loc[X.index].copy()
+    cat_cols = X.select_dtypes(include=["object", "category"]).columns.tolist()
+    y = (raw_y >= raw_y.quantile(0.5)).astype(int).copy()
+    X[cat_cols] = X[cat_cols].astype("category")
+
+    sorter = CategoricalSorter(scoring_function=woe_scoring_func)
+    encoder = SortedOrdinalEncoder(sorter)
+    bin_calculator = NBinsCalculator(strategy=FreedmanDiaconisStrategy(), max_bins=20)
+    discretizer = PandasQCutDiscretizer(bin_calculator=bin_calculator)
+    evaluator = BinaryRuleEvaluator(
+        score_strategies=[WoEScore(), RecallScore(), PrecisionScore()]
+    )
+    rule_filter = BinaryRuleFilter(min_recall=0.1)
+    prism = PrismRules(encoder, discretizer, evaluator)
+    rules = prism.find_rules(X, y, rule_filter, max_depth=3)
+
+
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix, hstack
+
+
+def discretize_and_create_sparse_matrix(df, num_quantiles=10):
+    # df = df.select_dtypes(include=[np.number]).copy()
+    sparse_matrix_list = []
+    rule_map = {}
+
+    for column in df.columns:
+        series = df[column]  # Work with non-NA values to determine bins
+        unique_values = series.unique()
+
+        # Check if there are enough unique values to support the desired number of quantiles
+        if len(unique_values) < num_quantiles:
+            actual_quantiles = len(
+                unique_values
+            )  # Use the number of unique values as the number of quantiles
+        else:
+            actual_quantiles = num_quantiles
+
+        has_nans = df[column].isna().any()
+        if has_nans:
+            nan_column_sparse = csr_matrix(
+                df[column].isna().astype(int).values.reshape(-1, 1)
+            )
+            sparse_matrix_list.append(nan_column_sparse)
+            rule_map[f"{column}.isna()"] = len(sparse_matrix_list) - 1
+
+        if (
+            actual_quantiles > 1
+        ):  # Proceed only if there are at least two bins to create
+            discretized, bins = pd.qcut(
+                series, q=actual_quantiles, duplicates="drop", retbins=True
+            )
+            # df[column] = pd.qcut(df[column], q=actual_quantiles, labels=False, duplicates='drop')
+
+            for i in range(len(bins) - 1):
+                # print(bins, df[column])
+                # <= and > operators for each bin boundary
+                in_bin_le = pd.Series(
+                    np.where(series.isna(), False, series <= bins[i + 1])
+                )
+                sparse_matrix_list.append(
+                    csr_matrix(in_bin_le.astype(int).values.reshape(-1, 1))
+                )
+                rule_map[f"`{column}` <= {bins[i+1]}"] = len(sparse_matrix_list) - 1
+                # print(f"`{column}` <= {bins[i+1]}", in_bin_le.sum())
+                in_bin_gt = pd.Series(
+                    np.where(series.isna(), False, series > bins[i + 1])
+                )
+                sparse_matrix_list.append(
+                    csr_matrix(in_bin_gt.astype(int).values.reshape(-1, 1))
+                )
+                rule_map[f"`{column}` > {bins[i+1]}"] = len(sparse_matrix_list) - 1
+                # print(f"`{column}` > {bins[i+1]}", in_bin_gt.sum())
+                if i > 0:
+                    in_bin_lt = pd.Series(
+                        np.where(series.isna(), False, series < bins[i])
+                    )
+                    sparse_matrix_list.append(
+                        csr_matrix(in_bin_lt.astype(int).values.reshape(-1, 1))
+                    )
+                    rule_map[f"`{column}` < {bins[i]}"] = len(sparse_matrix_list) - 1
+
+                    in_bin_ge = pd.Series(
+                        np.where(series.isna(), False, series >= bins[i])
+                    )
+                    sparse_matrix_list.append(
+                        csr_matrix(in_bin_ge.astype(int).values.reshape(-1, 1))
+                    )
+                    rule_map[f"`{column}` >= {bins[i]}"] = len(sparse_matrix_list) - 1
+        else:
+            print(f"Not enough unique values in {column} to discretize as requested.")
+
+    final_sparse_matrix = (
+        hstack(sparse_matrix_list) if sparse_matrix_list else csr_matrix((len(df), 0))
+    )
+    return final_sparse_matrix, rule_map
+
+
+def combine_rules_and_calculate_woe(X, y, rule_map, rules):
+    indices = [rule_map[rule] for rule in rules if rule in rule_map]
+    if not indices:
+        return np.nan  # Return NaN if no valid rules found
+
+    # Initialize the combined rule with the first rule's data
+    combined_rule = X[:, indices[0]].toarray()
+
+    # Multiply subsequent rule columns to apply logical AND
+    for idx in indices[1:]:
+        combined_rule *= X[:, idx].toarray()
+
+    # Calculate WoE
+    combined_rule = combined_rule.ravel()  # Flatten the array to 1D
+    total_goods = np.sum(y == 1)
+    total_bads = np.sum(y == 0)
+    goods = np.sum(combined_rule[y == 1])
+    bads = np.sum(combined_rule[y == 0])
+
+    if goods == 0 or bads == 0:
+        return np.nan  # Avoid division by zero or log(0)
+
+    good_ratio = goods / total_goods
+    bad_ratio = bads / total_bads
+    woe = np.log(good_ratio / bad_ratio)
+    return woe
+
+
+from scipy.sparse import csr_matrix
+
+
+def calculate_support_and_goods(X_sparse, y):
+    if isinstance(y, pd.Series):
+        y = y.values
+    if y.ndim == 1:
+        y = y.reshape(-1, 1)  # Ensure y is a column vector
+    y_sparse = csr_matrix(y)  # Convert y to a sparse matrix
+    goods = X_sparse.multiply(y_sparse).sum(axis=0)
+    support = X_sparse.sum(axis=0)
+    return np.array(support).flatten(), np.array(goods).flatten()
+
+
+def calculate_woe(support, goods, total_goods, total_bads):
+    # Adding a small constant to avoid division by zero or log of zero
+    if total_goods == 0 or total_bads == 0:
+        return -np.inf
+    epsilon = 1
+    bads = support - goods
+    distribution_of_goods = (goods + epsilon) / total_goods
+    distribution_of_bads = (bads + epsilon) / total_bads
+    woe = np.log(distribution_of_goods / distribution_of_bads)
+    return woe
+
+
+def find_best_rule(X_sparse, y, rule_map, total_goods, total_bads):
+    support, goods = calculate_support_and_goods(X_sparse, y)
+    woe_scores = calculate_woe(support, goods, total_goods, total_bads)
+    best_index = np.argmax(woe_scores)
+    best_rule = list(rule_map.keys())[best_index]
+    return best_index, best_rule
+
+
+def filter_sparse_matrix(X_sparse, y, rule_index):
+    selector = X_sparse[:, rule_index].toarray().flatten() == 1
+    X_filtered = X_sparse[selector]
+    y_filtered = y[selector]
+    return X_filtered, y_filtered
+
+
+def iterative_rule_refinement(X_sparse, y, rule_map, min_pos=5):
+    total_goods = np.sum(y)
+    total_bads = len(y) - total_goods
+    previous_best_score = -np.inf
+
+    while X_sparse.get_shape()[1] > 0:
+        best_index, best_rule = find_best_rule(
+            X_sparse, y, rule_map, total_goods, total_bads
+        )
+        current_best_score = calculate_woe(
+            X_sparse[:, best_index].sum(),
+            y[X_sparse[:, best_index].toarray().flatten() == 1].sum(),
+            total_goods,
+            total_bads,
+        )
+        if current_best_score <= previous_best_score:  # Stop if no improvement
+            print("No improvement in WoE score. Stopping refinement.")
+            break
+
+        previous_best_score = current_best_score
+        print(f"Refining rule: {best_rule} with WoE score: {current_best_score:.3f}")
+
+        X_sparse, y = filter_sparse_matrix(X_sparse, y, best_index)
+
+        if X_sparse.get_shape()[1] == 0:
+            break
+
+        # Remove columns with fewer than min_pos positive entries
+        column_sums = X_sparse.sum(axis=0).A.flatten()
+        valid_columns = column_sums >= min_pos
+        X_sparse = X_sparse[:, valid_columns]
+
+        # Rebuild rule_map with new valid column indices
+        old_to_new_indices = {
+            old: new for new, old in enumerate(np.where(valid_columns)[0])
+        }
+        rule_map = {
+            rule: old_to_new_indices[idx]
+            for rule, idx in rule_map.items()
+            if idx in old_to_new_indices
+        }
+
+
+def find_best_rule_in_X(
+    X_sparse, y, rule_map, total_goods, total_bads, previous_best_score, min_pos=5
+):
+    best_index, best_rule = find_best_rule(
+        X_sparse, y, rule_map, total_goods, total_bads
+    )
+    current_best_score = calculate_woe(
+        X_sparse[:, best_index].sum(),
+        y[X_sparse[:, best_index].toarray().flatten() == 1].sum(),
+        total_goods,
+        total_bads,
+    )
+    if previous_best_score >= current_best_score:  # Stop if no improvement
+        print("No improvement in WoE score. Stopping refinement.")
+        return None, None, None, None, None, None
+
+    X_sparse_filtered, y_filtered = filter_sparse_matrix(X_sparse, y, best_index)
+
+    # Remove columns with fewer than min_pos positive entries
+    column_sums = X_sparse_filtered.sum(axis=0).A.flatten()
+    valid_columns = column_sums >= min_pos
+    X_sparse_filtered = X_sparse_filtered[:, valid_columns]
+
+    # Rebuild rule_map with new valid column indices
+    old_to_new_indices = {
+        old: new for new, old in enumerate(np.where(valid_columns)[0])
+    }
+    new_rule_map = {
+        rule: old_to_new_indices[idx]
+        for rule, idx in rule_map.items()
+        if idx in old_to_new_indices
+    }
+    return best_rule, current_best_score, X_sparse_filtered, y_filtered, new_rule_map
+
+
+def filter_sparse_matrix(X_sparse, y, rule_index, min_pos=5):
+    selector = X_sparse[:, rule_index].toarray().flatten() == 1
+    selector_negation = ~selector
+
+    X_sparse_filtered_true = X_sparse[selector]
+    y_filtered_true = y[selector]
+
+    X_sparse_filtered_false = X_sparse[selector_negation]
+    y_filtered_false = y[selector_negation]
+
+    return (X_sparse_filtered_true, y_filtered_true), (
+        X_sparse_filtered_false,
+        y_filtered_false,
+    )
+
+
+def update_rule_map(X_sparse_filtered, rule_map, min_pos):
+    # Remove columns with fewer than min_pos positive entries
+    column_sums = X_sparse_filtered.sum(axis=0).A.flatten()
+    valid_columns = column_sums >= min_pos
+    X_sparse_filtered = X_sparse_filtered[:, valid_columns]
+
+    # Rebuild rule_map with new valid column indices
+    old_to_new_indices = {
+        old: new for new, old in enumerate(np.where(valid_columns)[0])
+    }
+    new_rule_map = {
+        rule: old_to_new_indices[idx]
+        for rule, idx in rule_map.items()
+        if idx in old_to_new_indices
+    }
+
+    return X_sparse_filtered, new_rule_map
+
+
+def calculate_false_woe(X_sparse_false, y_false, total_goods, total_bads):
+    false_goods = np.sum(y_false)
+    return calculate_woe(
+        X_sparse_false.sum(), false_goods, total_goods, total_bads
+    )  # TODO: fix
+
+
+def find_best_rule_in_X(
+    X_sparse, y, rule_map, total_goods, total_bads, previous_best_score, min_pos=5
+):
+    best_index, best_rule = find_best_rule(
+        X_sparse, y, rule_map, total_goods, total_bads
+    )
+    current_best_score = calculate_woe(
+        X_sparse[:, best_index].sum(),
+        y[X_sparse[:, best_index].toarray().flatten() == 1].sum(),
+        total_goods,
+        total_bads,
+    )
+
+    if previous_best_score >= current_best_score:  # Stop if no improvement
+        # print("No improvement in WoE score. Stopping refinement.")
+        return None, None, None, None, None, None, None, None
+
+    (
+        (X_sparse_filtered_true, y_filtered_true),
+        (X_sparse_filtered_false, y_filtered_false),
+    ) = filter_sparse_matrix(X_sparse, y, best_index)
+
+    X_sparse_filtered_true, new_rule_map_true = update_rule_map(
+        X_sparse_filtered_true, rule_map, min_pos
+    )
+    X_sparse_filtered_false, new_rule_map_false = update_rule_map(
+        X_sparse_filtered_false, rule_map, min_pos
+    )
+
+    return (
+        best_rule,
+        current_best_score,
+        X_sparse_filtered_true,
+        y_filtered_true,
+        new_rule_map_true,
+        X_sparse_filtered_false,
+        y_filtered_false,
+        new_rule_map_false,
+    )
+
+
+from graphviz import Digraph
+
+
+class DecisionTreeNode:
+    def __init__(
+        self,
+        rule=None,
+        true_branch=None,
+        false_branch=None,
+        is_leaf=False,
+        score=0.0,
+        score_true=None,
+        score_false=None,
+    ):
+        self.rule = rule
+        self.true_branch = true_branch
+        self.false_branch = false_branch
+        self.is_leaf = is_leaf
+        self.score = score  # This remains as the base score for any computations.
+        self.score_true = score_true  # Score when the rule results in true
+        self.score_false = score_false  # Score when the rule results in false
+
+    def __str__(self):
+        return f"Rule: {self.rule}, Base Score: {self.score}, Score True: {self.score_true}, Score False: {self.score_false}, Is Leaf: {self.is_leaf}"
+
+
+def build_decision_tree(
+    X_sparse,
+    y,
+    rule_map,
+    previous_best_score,
+    total_goods,
+    total_bads,
+    depth,
+    max_depth=3,
+    min_samples=10,
+    min_pos=5,
+    min_improvement=0.00001,
+):
+    if depth >= max_depth or len(y) < min_samples:
+        return DecisionTreeNode(is_leaf=True, score=previous_best_score)
+
+    (
+        best_rule,
+        current_best_score,
+        X_sparse_true,
+        y_true,
+        rule_map_true,
+        X_sparse_false,
+        y_false,
+        rule_map_false,
+    ) = find_best_rule_in_X(
+        X_sparse,
+        y,
+        rule_map,
+        total_goods,
+        total_bads,
+        previous_best_score,
+        min_pos=min_pos,
+    )
+
+    if (
+        best_rule is None
+        or (current_best_score - previous_best_score) < min_improvement
+    ):
+        return DecisionTreeNode(is_leaf=True, score=previous_best_score)
+
+    score_true = (
+        current_best_score  # this score is achieved when the rule result is true
+    )
+    score_false = calculate_false_woe(
+        X_sparse_false, y_false, total_goods, total_bads
+    )  # calculating score when the rule result is false
+    true_branch = build_decision_tree(
+        X_sparse_true,
+        y_true,
+        rule_map_true,
+        score_true,
+        total_goods,
+        total_bads,
+        depth + 1,
+        max_depth,
+        min_samples,
+        min_pos,
+        min_improvement,
+    )
+    if not np.isnan(score_false):
+        false_branch = build_decision_tree(
+            X_sparse_false,
+            y_false,
+            rule_map_false,
+            score_false,
+            total_goods,
+            total_bads,
+            depth + 1,
+            max_depth,
+            min_samples,
+            min_pos,
+            min_improvement,
+        )
+    else:
+        false_branch = DecisionTreeNode(is_leaf=True, score=score_true)
+    return DecisionTreeNode(
+        rule=best_rule,
+        true_branch=true_branch,
+        false_branch=false_branch,
+        score=previous_best_score,
+        score_true=score_true,
+        score_false=score_false,
+    )
+
+
+from graphviz import Digraph
+
+
+class DecisionTreePlotter:
+    def __init__(self, tree_root):
+        self.tree_root = tree_root
+
+    def add_nodes_edges(
+        self, dot, node, parent_id=None, parent=None, edge_label=None, depth=0
+    ):
+        current_id = f"node_{id(node)}_{depth}"
+        node_color = "lightgreen" if node.is_leaf else "lightblue"
+        if parent_id:
+            # Use the parent's score for decisions based on edge label
+            if edge_label == "Yes":
+                score = (
+                    parent.score_true
+                    if parent and parent.score_true is not None
+                    else None
+                )
+            else:
+                score = (
+                    parent.score_false
+                    if parent and parent.score_false is not None
+                    else None
+                )
+
+            # Skip nodes with invalid scores.
+            if node.is_leaf and (
+                score is None or score <= 0 or np.isinf(score) or np.isnan(score)
+            ):
+                return
+
+            # Append score to the edge label for visualization, rounded to 2 decimals.
+            if score is not None:
+                edge_label_formatted = f"{edge_label}\nScore: {round(score, 2)}"
+            else:
+                edge_label_formatted = edge_label
+
+            dot.edge(
+                parent_id,
+                current_id,
+                label=edge_label_formatted,
+                arrowsize="0.6",
+                color="black",
+            )
+
+        label = (
+            f"Leaf\nScore: {round(score, 2)}"
+            if node.is_leaf and score is not None
+            else node.rule
+        )
+        dot.node(current_id, label, fillcolor=node_color, style="filled")
+
+        if not node.is_leaf:
+            self.add_nodes_edges(
+                dot, node.true_branch, current_id, node, "Yes", depth + 1
+            )
+            self.add_nodes_edges(
+                dot, node.false_branch, current_id, node, "No", depth + 1
+            )
+
+    def plot_tree(self):
+        dot = Digraph(
+            node_attr={
+                "style": "filled",
+                "shape": "box",
+                "rounded": "true",
+                "fillcolor": "lightyellow",
+            },
+            edge_attr={"color": "black", "arrowsize": "0.6"},
+            graph_attr={"fontsize": "16", "fontname": "Helvetica"},
+        )
+
+        if self.tree_root:
+            self.add_nodes_edges(dot, self.tree_root)
+
+        return dot
